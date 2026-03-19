@@ -1,0 +1,322 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>MS-DOS Professional Edition</title>
+    <style>
+        :root { --green: #00FF00; --bg: #000; }
+        body { 
+            background: #1a1a1a; color: var(--green); 
+            font-family: "Courier New", Courier, monospace; 
+            margin: 0; padding: 0; overflow: hidden; 
+        }
+        #monitor { 
+            background: var(--bg); height: 100vh; padding: 20px; 
+            box-sizing: border-box; overflow-y: auto; position: relative; 
+        }
+        #monitor::-webkit-scrollbar { width: 8px; }
+        #monitor::-webkit-scrollbar-thumb { background: #333; }
+        
+        .line { margin-bottom: 4px; white-space: pre-wrap; min-height: 1.2em; }
+        .input-area { display: flex; align-items: center; }
+        #cmd-input { 
+            background: transparent; border: none; color: inherit; 
+            font-family: inherit; font-size: inherit; outline: none; flex: 1; 
+        }
+        #prompt { margin-right: 10px; }
+
+        /* CRT Overlay */
+        .scanlines {
+            position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+            background: linear-gradient(rgba(18, 16, 16, 0) 50%, rgba(0, 0, 0, 0.1) 50%);
+            background-size: 100% 4px; z-index: 100; pointer-events: none;
+        }
+
+        /* Editor Mode Styles */
+        #editor-container {
+            display: none; position: fixed; top: 0; left: 0; 
+            width: 100%; height: 100%; background: #0000AA; color: #FFF;
+            z-index: 200; flex-direction: column;
+        }
+        #editor-header { background: #ccc; color: #000; padding: 2px 10px; font-weight: bold; }
+        #editor-text { 
+            flex: 1; background: transparent; color: #FFF; border: none; 
+            padding: 20px; font-family: inherit; font-size: 1.1rem; outline: none; resize: none;
+        }
+        #editor-footer { background: #ccc; color: #000; padding: 2px 10px; font-size: 0.8rem; }
+    </style>
+</head>
+<body>
+
+<div class="scanlines"></div>
+
+<div id="monitor">
+    <div id="history"></div>
+    <div class="input-area" id="input-row">
+        <span id="prompt">C:\></span>
+        <input type="text" id="cmd-input" autofocus spellcheck="false" autocomplete="off">
+    </div>
+</div>
+
+<!-- Simple Text Editor UI (Mimicking EDIT.COM) -->
+<div id="editor-container">
+    <div id="editor-header">MS-DOS Editor - <span id="edit-filename">UNTITLED.TXT</span></div>
+    <textarea id="editor-text"></textarea>
+    <div id="editor-footer">Press ESC to Save and Exit</div>
+</div>
+
+<script>
+    /* 
+    =========================================
+    VIRTUAL FILE SYSTEM & STATE
+    =========================================
+    */
+    const STORAGE_KEY = "DOS_PRO_FILESYSTEM";
+    const historyElement = document.getElementById('history');
+    const inputElement = document.getElementById('cmd-input');
+    const monitor = document.getElementById('monitor');
+    const promptElement = document.getElementById('prompt');
+
+    // Editor elements
+    const editor = document.getElementById('editor-container');
+    const editorTextArea = document.getElementById('editor-text');
+    const editorFilename = document.getElementById('edit-filename');
+
+    let currentPath = ["C:"];
+    let editingFile = null;
+
+    const defaultFS = {
+        "C:": {
+            type: "dir",
+            content: {
+                "AUTOEXEC.BAT": { type: "file", content: "@ECHO OFF\nCLS", hidden: false },
+                "CONFIG.SYS": { type: "file", content: "FILES=30\nBUFFERS=30", hidden: false },
+                "DOS": { type: "dir", content: {}, hidden: false },
+                "USER": { type: "dir", content: {}, hidden: false }
+            }
+        }
+    };
+
+    let fs = JSON.parse(localStorage.getItem(STORAGE_KEY)) || defaultFS;
+
+    function saveFS() {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(fs));
+    }
+
+    function getDir(pathArr) {
+        let curr = fs;
+        for (let seg of pathArr) {
+            curr = curr[seg].content;
+        }
+        return curr;
+    }
+
+    /* 
+    =========================================
+    UI UTILITIES
+    =========================================
+    */
+    function print(text, type = "normal") {
+        const div = document.createElement('div');
+        div.className = "line";
+        if (type === "error") div.style.color = "red";
+        div.textContent = text;
+        historyElement.appendChild(div);
+        monitor.scrollTop = monitor.scrollHeight;
+    }
+
+    function updatePrompt() {
+        promptElement.textContent = currentPath.join('\\') + ">";
+    }
+
+    /* 
+    =========================================
+    COMMAND LOGIC
+    =========================================
+    */
+    const commands = {
+        'help': () => {
+            print("MS-DOS Commands:");
+            print("DIR [attr]  - List files in directory");
+            print("CD [dir]    - Change directory (.. for back)");
+            print("MD [dir]    - Make directory");
+            print("RD [dir]    - Remove directory");
+            print("EDIT [file] - Create/Edit text files");
+            print("TYPE [file] - Display file content");
+            print("DEL [file]  - Delete a file");
+            print("REN [a] [b] - Rename file");
+            print("MOVE [a] [b]- Move file to directory");
+            print("CLS         - Clear screen");
+            print("VER         - System version");
+            print("FORMAT C:   - Reset system");
+        },
+
+        'cls': () => {
+            historyElement.innerHTML = "";
+        },
+
+        'ver': () => {
+            print("MS-DOS Professional Edition [Version 6.22.persist]");
+        },
+
+        'dir': () => {
+            const dir = getDir(currentPath);
+            print(` Volume in drive C has no label.`);
+            print(` Directory of ${currentPath.join('\\')}\n`);
+            
+            let fileCount = 0;
+            let dirCount = 0;
+
+            Object.keys(dir).forEach(name => {
+                const item = dir[name];
+                const typeLabel = item.type === "dir" ? "<DIR>" : item.content.length.toString().padStart(5);
+                print(`${name.padEnd(15)} ${typeLabel}    03-18-2024`);
+                if (item.type === "dir") dirCount++; else fileCount++;
+            });
+
+            print(`\n       ${fileCount} File(s)`);
+            print(`       ${dirCount} Dir(s)`);
+        },
+
+        'md': (args) => {
+            if (!args[0]) return print("Required parameter missing", "error");
+            const dir = getDir(currentPath);
+            const name = args[0].toUpperCase();
+            if (dir[name]) return print("Directory or file already exists");
+            dir[name] = { type: "dir", content: {}, hidden: false };
+            saveFS();
+        },
+
+        'cd': (args) => {
+            const target = args[0]?.toUpperCase();
+            if (!target || target === "\\") {
+                currentPath = ["C:"];
+            } else if (target === "..") {
+                if (currentPath.length > 1) currentPath.pop();
+            } else {
+                const dir = getDir(currentPath);
+                if (dir[target] && dir[target].type === "dir") {
+                    currentPath.push(target);
+                } else {
+                    print("Invalid directory", "error");
+                }
+            }
+            updatePrompt();
+        },
+
+        'edit': (args) => {
+            if (!args[0]) return print("Usage: EDIT [filename]", "error");
+            const name = args[0].toUpperCase();
+            const dir = getDir(currentPath);
+            
+            editingFile = name;
+            editorFilename.textContent = name;
+            editorTextArea.value = dir[name] ? dir[name].content : "";
+            
+            editor.style.display = "flex";
+            editorTextArea.focus();
+        },
+
+        'type': (args) => {
+            if (!args[0]) return print("Usage: TYPE [filename]");
+            const dir = getDir(currentPath);
+            const file = dir[args[0].toUpperCase()];
+            if (file && file.type === "file") print(file.content);
+            else print("File not found", "error");
+        },
+
+        'del': (args) => {
+            if (!args[0]) return print("Usage: DEL [filename]");
+            const dir = getDir(currentPath);
+            const name = args[0].toUpperCase();
+            if (dir[name] && dir[name].type === "file") {
+                delete dir[name];
+                saveFS();
+            } else print("File not found", "error");
+        },
+
+        'ren': (args) => {
+            if (args.length < 2) return print("Usage: REN [old] [new]");
+            const dir = getDir(currentPath);
+            const oldN = args[0].toUpperCase();
+            const newN = args[1].toUpperCase();
+            if (dir[oldN]) {
+                dir[newN] = dir[oldN];
+                delete dir[oldN];
+                saveFS();
+            } else print("File not found", "error");
+        },
+
+        'format': (args) => {
+            if (args[0]?.toUpperCase() === "C:") {
+                if (confirm("Proceed with format? All data will be lost.")) {
+                    localStorage.removeItem(STORAGE_KEY);
+                    location.reload();
+                }
+            } else print("Usage: FORMAT C:");
+        }
+    };
+
+    /* 
+    =========================================
+    EVENT LISTENERS
+    =========================================
+    */
+    inputElement.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') {
+            const raw = inputElement.value.trim();
+            const [cmd, ...args] = raw.split(/\s+/);
+            
+            print(`${promptElement.textContent}${raw}`);
+            
+            if (cmd) {
+                const commandFn = commands[cmd.toLowerCase()];
+                if (commandFn) commandFn(args);
+                else print(`Bad command or file name: '${cmd}'`, "error");
+            }
+
+            inputElement.value = "";
+        }
+    });
+
+    // Editor Logic (ESC to save/exit)
+    editorTextArea.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape') {
+            const dir = getDir(currentPath);
+            dir[editingFile] = { 
+                type: "file", 
+                content: editorTextArea.value, 
+                hidden: false 
+            };
+            saveFS();
+            editor.style.display = "none";
+            editingFile = null;
+            inputElement.focus();
+            print("File saved successfully.");
+        }
+    });
+
+    // Boot Sequence
+    function boot() {
+        print("BIOS version 1.0.4...");
+        setTimeout(() => print("Checking RAM: 640KB OK"), 400);
+        setTimeout(() => print("Detecting Drive C..."), 800);
+        setTimeout(() => {
+            print("\nMicrosoft(R) MS-DOS(R) Version 6.22");
+            print("(C)Copyright Microsoft Corp 1981-1994.");
+            print("C:\\>SET PATH=C:\\DOS;C:\\");
+            print("C:\\>PROMPT $P$G");
+            print("\nWelcome back. Type HELP to begin.");
+            updatePrompt();
+        }, 1200);
+    }
+
+    window.onclick = () => {
+        if (editor.style.display !== "flex") inputElement.focus();
+    };
+
+    boot();
+
+</script>
+</body>
+</html>
